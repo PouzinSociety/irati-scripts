@@ -1,0 +1,298 @@
+#!/bin/bash
+#
+# Script start/stop IRATI's IPCM with a specific configuration.
+#
+# Usage:
+#    rina start <config name>
+#    rina stop
+#    rina status
+#
+# Environment variables to set before calling this script
+#
+# RINA_RUNTIME_DIR:
+#   Path to the runtime file (active configuration, PID file)
+# RINA_CONFIG_ROOT:
+#   Path to the configuration files
+# RINA_LOG_ROOT:
+#   Path where the log files will be stored.
+# RINA_IPCM:
+#   Path to the IPCM binary
+
+set -u
+
+# Ensure that all variables passed as aa
+ensure_variables_set() {
+    local v err=0
+
+    for v in "$@"; do
+        if [ ! -v ${v} ] || [ -z ${!v} ]; then
+            echo "Variable $v must be set"
+            err=1
+        fi
+    done
+    if [ $err -eq 1 ]; then
+        exit 1
+    fi
+}
+
+ensure_directory_exists() {
+    local err=0
+
+    for v in "$@"; do
+        if [ ! -d ${!v} ]; then
+            echo "Directory for $v does not exists: ${!v}"
+            err=1
+        fi
+    done
+    if [ $err -eq 1 ]; then
+        exit 1
+    fi
+}
+
+ensure_executable() {
+    local err=0
+
+    for v in "$@"; do
+        if [ ! -x ${!v} ]; then
+            echo "File for $v should be executable: ${!v}"
+            err=1
+        fi
+    done
+    if [ $err -eq 1 ]; then
+        exit 1
+    fi
+}
+
+modprobe_or_die() {
+    # Check if already loaded...
+    if [ ! -z $(lsmod | grep -q $1) ]; then
+        return
+    fi
+    modprobe $@
+    if [ $? -ne 0 ]; then
+        echo "Could not load module $1"
+        exit 1
+    fi
+}
+
+load_km() {
+    local verbosity=7
+
+    if [ ! -z ${1:-""} ] && [ "$1" = "verbose" ]; then
+        verbosity=9
+    fi
+
+    modprobe_or_die rina-irati-core irati_verbosity=${verbosity}
+    modprobe_or_die rina-default-plugin
+    modprobe_or_die normal-ipcp
+    modprobe_or_die shim-eth
+    modprobe_or_die shim-tcp-udp
+}
+
+unload_km() {
+    rmmod shim-tcp-udp
+    rmmod shim-eth
+    rmmod rinarp
+    rmmod arp826
+    rmmod normal-ipcp
+    rmmod rina-default-plugin
+    rmmod rina-irati-core
+}
+
+start() {
+    local cfgname cfgpath hostname result logpath configfile pidfile rtfile consoleSocket \
+          grpcSocket configfile upfile
+    cfgname=${1:-default}
+    hostname=$(hostname)
+
+    if [ $cfgname != "default" ]; then
+        if [ ! -d "${RINA_CONFIG_ROOT}/${cfgname}.${hostname}" ]; then
+            echo "Configuration $config, for hostname ${hostname}, does not exists in RINA_CONFIG_ROOT"
+            exit 1
+        fi
+        cfgpath="${RINA_CONFIG_ROOT}/${cfgname}.${hostname}"
+    else
+        if [ ! -d "${RINA_CONFIG_ROOT}/default" ]; then
+            echo "'default' configuration does not exit in RINA_CONFIG_ROOT"
+            exit 1
+        fi
+        cfgpath="${RINA_CONFIG_ROOT}/default"
+    fi
+
+    # Load the kernel modules if its not done already.
+    if [ ! -c /dev/irati-ctrl ]; then
+        load_km
+    fi
+
+    # Create the directory where the log will be put if it does not
+    # exists already.
+    if [ ! -d $RINA_LOG_ROOT/$cfgname ]; then
+        mkdir -p $RINA_LOG_ROOT/$cfgname
+    fi
+
+    logpath="${RINA_LOG_ROOT}/${cfgname}"
+    pidfile="${RINA_RUNTIME_DIR}/ipcm.pid"
+    rtfile="${RINA_RUNTIME_DIR}/ipcm.config"
+    consoleSocket="${RINA_RUNTIME_DIR}/ipcm.sock"
+    grpcSocket="${RINA_RUNTIME_DIR}/ipcm-grpc.sock"
+    configfile="${cfgpath}/ipcmanager.conf"
+    upfile="${cfgpath}/up.sh"
+
+    # If there is an "up" script in the configuration directory, run it.
+    if [ -x $upfile ]; then
+        $upfile
+        result=$?
+        if [ $result -ne 0 ]; then
+            echo "Cannot continue, up.sh returned error code: $result"
+            exit 1
+        fi
+    fi
+
+    # The -o option here is specific to the grpc_backend branch. It
+    # allows overriding the options available in the
+    # 'localConfiguration' block from the command line.
+    start-stop-daemon \
+        --start \
+        --background \
+        --exec ${RINA_IPCM} \
+        --oknodo \
+        --pidfile $pidfile \
+        --make-pidfile \
+        -- \
+        -o logPath=$logpath \
+        -o consoleSocket=$consoleSocket \
+        -o grpcSocket=$grpcSocket \
+        -c $configfile -l debug -a console,grpc,scripting
+
+    result=$?
+    case $result in
+        0)
+            echo "IPCM was started with the $(basename $cfgpath) configuration"
+            echo $cfgname > $rtfile
+            ;;
+        1)
+            status;;
+        *) echo "Error starting IPCM with the $(basename $cfgpath) configuration";;
+    esac
+}
+
+status() {
+    local pidfile result pid config
+
+    pidfile="${RINA_RUNTIME_DIR}/ipcm.pid"
+    rtfile="${RINA_RUNTIME_DIR}/ipcm.config"
+
+    start-stop-daemon \
+        --status \
+        --exec ${RINA_IPCM} \
+        --pidfile $pidfile
+
+    result=$?
+    if [ -f $pidfile ]; then
+        pid=$(cat $pidfile)
+        if [ $result -eq 0 ]; then
+            if [ -f $rtfile ]; then
+                config=$(cat $rtfile)
+                echo "IPCM is running. PID ${pid} - Configuration ${config}."
+            else
+                echo "IPCM is running. Unknown configuration!"
+            fi
+        elif [ $result -eq 1 ]; then
+            echo "IPCM is NOT running. PID was ${pid}. It was killed or crashed."
+        fi
+    else
+        echo "IPCM is NOT running."
+    fi
+}
+
+stop() {
+    local pidfile config dnfile result
+
+    config=$(cat "${RINA_RUNTIME_DIR}/ipcm.config")
+    pidfile="${RINA_RUNTIME_DIR}/ipcm.pid"
+    dnfile="${RINA_CONFIG_ROOT}/${config}.$(hostname)/down.sh"
+
+    start-stop-daemon \
+        --stop \
+        --retry TERM/5/KILL/30 \
+        --pidfile $pidfile \
+        --remove-pidfile \
+        --exec ${RINA_IPCM} \
+        --name ipcm
+
+    # If there is a down.sh file, run it.
+    if [ -x $dnfile ]; then
+        $dnfile
+        result=$?
+        if [ $result -ne 0 ]; then
+            echo "Error, down.sh returned error code: $result"
+            echo "The network configuration might require manual teardown"
+        fi
+    fi
+
+    sleep 1
+
+    if [ -c /dev/irati-ctrl ]; then
+        unload_km
+    fi
+}
+
+console() {
+    local consoleSocket
+
+    consoleSocket="${RINA_RUNTIME_DIR}/ipcm.sock"
+    socat - UNIX:$consoleSocket
+}
+
+exit_usage() {
+    echo "Usage: "
+    echo -e "\trina start <config>"
+    echo -e "\trina stop"
+    echo -e "\trina status"
+    echo -e "\trina console"
+    echo -e "\trina load-modules <verbose>"
+    echo -e "\trina unload-modules"
+    echo
+
+    exit 1
+}
+
+cmd=${1-}
+
+# We already need at least a command on the command line.
+[ -z "$cmd" ] && exit_usage
+
+# Read a global configuration file.
+if [ -f /etc/rina/rina.config ]; then
+    source /etc/rina/rina.config
+fi
+
+# We allow ourselves to create RINA_RUNTIME_DIR
+mkdir -p ${RINA_RUNTIME_DIR}
+
+# Validate the configuration
+
+ensure_variables_set RINA_RUNTIME_DIR RINA_IPCM RINA_LOG_ROOT RINA_CONFIG_ROOT
+ensure_directory_exists RINA_RUNTIME_DIR RINA_LOG_ROOT RINA_CONFIG_ROOT
+ensure_executable RINA_IPCM
+
+case $cmd in
+    start)
+        config=${2:-}
+        start $config;;
+    stop)
+        stop;;
+    status)
+        status;;
+    console)
+        console;;
+    config)
+        config;;
+    load-modules)
+        verbosity=${2:-"normal"}
+	    load_km ${verbosity};;
+    unload-modules)
+        unload_km;;
+    *)
+        echo "Unknown command: $cmd"
+esac
