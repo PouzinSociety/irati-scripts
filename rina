@@ -100,8 +100,8 @@ unload_km() {
 }
 
 start() {
-    local cfgname cfgpath hostname result logpath configfile pidfile rtfile consoleSocket \
-          grpcSocket configfile upfile
+    local cfgname cfgpath hostname result logpath configfile pidfile \
+          rtfile consoleSocket configfile upfile
     cfgname=${1:-default}
     hostname=$(hostname)
 
@@ -134,7 +134,6 @@ start() {
     pidfile="${RINA_RUNTIME_DIR}/ipcm.pid"
     rtfile="${RINA_RUNTIME_DIR}/ipcm.config"
     consoleSocket="${RINA_RUNTIME_DIR}/ipcm.sock"
-    grpcSocket="${RINA_RUNTIME_DIR}/ipcm-grpc.sock"
     configfile="${cfgpath}/ipcmanager.conf"
     upfile="${cfgpath}/up.sh"
 
@@ -148,9 +147,8 @@ start() {
         fi
     fi
 
-    # The -o option here is specific to the grpc_backend branch. It
-    # allows overriding the options available in the
-    # 'localConfiguration' block from the command line.
+    # The -o option here# allows overriding the options available in
+    # the 'localConfiguration' block from the command line.
     start-stop-daemon \
         --start \
         --background \
@@ -161,8 +159,7 @@ start() {
         -- \
         -o logPath=$logpath \
         -o consoleSocket=$consoleSocket \
-        -o grpcSocket=$grpcSocket \
-        -c $configfile -l debug -a console,grpc,scripting
+        -c $configfile -l debug -a console,scripting
 
     result=$?
     case $result in
