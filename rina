@@ -241,6 +241,21 @@ console() {
     socat - UNIX:$consoleSocket
 }
 
+cmd() {
+    local consoleSocket
+
+    consoleSocket="${RINA_RUNTIME_DIR}/ipcm.sock"
+    cmd=${1:-}
+
+    if [ -z "$cmd" ]; then
+        echo "Missing command to execute."
+        exit 1
+    fi
+
+    shift
+    irati-ctl --unix-socket ${consoleSocket} ${cmd} $@
+}
+
 exit_usage() {
     echo "Usage: "
     echo -e "\trina start <config>"
@@ -250,6 +265,7 @@ exit_usage() {
     echo -e "\trina load-modules <verbose>"
     echo -e "\trina unload-modules"
     echo
+    echo "Unknown commands are passed to 'irati-ctl'"
 
     exit 1
 }
@@ -291,5 +307,5 @@ case $cmd in
     unload-modules)
         unload_km;;
     *)
-        echo "Unknown command: $cmd"
+        cmd $@
 esac
